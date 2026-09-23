@@ -50,11 +50,16 @@ jobs:
               return res.returncode, res.stdout, res.stderr
 
           tenancy_id = os.environ.get("OCI_TENANCY")
-          ssh_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDK88GTj+LiuWt1hw9x8mo4qNJ+sCl1w3Aet+DSWABIOK1GFgaC5ahVyWq9pJ6ehv+BufIFkfLoRFhG5Gipp2ZDLjiobfQYH93oiawykuhoVTRDFUOWlgtPwBGNtdoQKN5w0FYjv4V/YWSppt8noLN6+lmumeinrnHZytsbizlWpI6Y9fouFtqKvShMRU/zh+t73C/GrxcmX8xf5s81lUwnubCMyMhFfkKqf8AqroFmo0H8ycoCN0XFxnIB1I2IMO8qZA/mv8rIeYzTCtCJ2yTO61aQrFhvcb2e9KeOlOe5s3fUHBZgH+hEAh+lF5OuOHQmQiHFTh4t+s97JyTu8tKF"
+          
+          # Injects both the web-generated key and your local machine's id_ed25519 key
+          ssh_keys = (
+              "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDK88GTj+LiuWt1hw9x8mo4qNJ+sCl1w3Aet+DSWABIOK1GFgaC5ahVyWq9pJ6ehv+BufIFkfLoRFhG5Gipp2ZDLjiobfQYH93oiawykuhoVTRDFUOWlgtPwBGNtdoQKN5w0FYjv4V/YWSppt8noLN6+lmumeinrnHZytsbizlWpI6Y9fouFtqKvShMRU/zh+t73C/GrxcmX8xf5s81lUwnubCMyMhFfkKqf8AqroFmo0H8ycoCN0XFxnIB1I2IMO8qZA/mv8rIeYzTCtCJ2yTO61aQrFhvcb2e9KeOlOe5s3fUHBZgH+hEAh+lF5OuOHQmQiHFTh4t+s97JyTu8tKF\n"
+              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILnq6iEl/mbWSO+k+cbNJhXi72vT4BP8ZAovHxN2KqVw oracle-openclaw\n"
+          )
 
           key_path = os.path.expanduser("/tmp/instance_key.pub")
           with open(key_path, "w") as f:
-              f.write(ssh_key.strip() + "\n")
+              f.write(ssh_keys)
 
           # Discover Subnet
           _, out, _ = run(f'oci network subnet list --compartment-id {tenancy_id} --display-name "subnet-20260325-2112" --query "data[0].id" --raw-output')
