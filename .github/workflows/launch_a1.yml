@@ -1,0 +1,107 @@
+name: Launch A1 Instance
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure OCI CLI
+        run: |
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+
+          cat <<EOF > ~/.oci/config
+          [DEFAULT]
+          user=${{ secrets.OCI_USER_OCID }}
+          fingerprint=${{ secrets.OCI_FINGERPRINT }}
+          key_file=/home/runner/.oci/oci_api_key.pem
+          tenancy=${{ secrets.OCI_TENANCY_OCID }}
+          region=${{ secrets.OCI_REGION }}
+          EOF
+          chmod 600 ~/.oci/config
+
+      - name: Install OCI CLI & Python dependencies
+        run: |
+          bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
+          echo "/home/runner/bin" >> $GITHUB_PATH
+
+      - name: Attempt Instance Launch
+        run: |
+          export PATH="/home/runner/bin:$PATH"
+          export OCI_TENANCY="${{ secrets.OCI_TENANCY_OCID }}"
+          
+          # Check if instance already exists
+          EXISTING=$(oci compute instance list --compartment-id "$OCI_TENANCY" --lifecycle-state RUNNING --query "data[?contains(\"display-name\", 'instance-20260923-0114')].id" --raw-output)
+          if [ -n "$EXISTING" ]; then
+            echo "Instance already exists and is running. Exiting."
+            exit 0
+          fi
+
+          python3 - <<'EOF'
+          import json, os, subprocess, sys, time
+
+          def run(cmd):
+              res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+              return res.returncode, res.stdout, res.stderr
+
+          tenancy_id = os.environ.get("OCI_TENANCY")
+          ssh_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDK88GTj+LiuWt1hw9x8mo4qNJ+sCl1w3Aet+DSWABIOK1GFgaC5ahVyWq9pJ6ehv+BufIFkfLoRFhG5Gipp2ZDLjiobfQYH93oiawykuhoVTRDFUOWlgtPwBGNtdoQKN5w0FYjv4V/YWSppt8noLN6+lmumeinrnHZytsbizlWpI6Y9fouFtqKvShMRU/zh+t73C/GrxcmX8xf5s81lUwnubCMyMhFfkKqf8AqroFmo0H8ycoCN0XFxnIB1I2IMO8qZA/mv8rIeYzTCtCJ2yTO61aQrFhvcb2e9KeOlOe5s3fUHBZgH+hEAh+lF5OuOHQmQiHFTh4t+s97JyTu8tKF"
+
+          key_path = os.path.expanduser("/tmp/instance_key.pub")
+          with open(key_path, "w") as f:
+              f.write(ssh_key.strip() + "\n")
+
+          # Discover Subnet
+          _, out, _ = run(f'oci network subnet list --compartment-id {tenancy_id} --display-name "subnet-20260325-2112" --query "data[0].id" --raw-output')
+          subnet_id = out.strip()
+          if not subnet_id or subnet_id == "None":
+              _, out, _ = run(f'oci network subnet list --compartment-id {tenancy_id} --query "data[0].id" --raw-output')
+              subnet_id = out.strip()
+
+          # Discover Image
+          _, out, _ = run(
+              f'oci compute image list --compartment-id {tenancy_id} --shape VM.Standard.A1.Flex '
+              f'--operating-system "Oracle Linux" --operating-system-version "9" '
+              f'--sort-by TIMECREATED --sort-order DESC --query "data[0].id" --raw-output'
+          )
+          image_id = out.strip()
+
+          # Discover ADs
+          _, out, _ = run(f'oci iam availability-domain list --compartment-id {tenancy_id} --query "data[].name" --output json')
+          ads = json.loads(out)
+
+          shape_config = json.dumps({"ocpus": 2, "memoryInGBs": 12})
+          instance_name = "instance-20260923-0114"
+
+          # Try each AD
+          for ad in ads:
+              print(f"Trying launch in {ad}...")
+              cmd = (
+                  f'oci compute instance launch '
+                  f'--availability-domain "{ad}" '
+                  f'--compartment-id "{tenancy_id}" '
+                  f'--display-name "{instance_name}" '
+                  f'--image-id "{image_id}" '
+                  f'--shape "VM.Standard.A1.Flex" '
+                  f'--shape-config \'{shape_config}\' '
+                  f'--subnet-id "{subnet_id}" '
+                  f'--boot-volume-size-in-gbs 50 '
+                  f'--boot-volume-vpus-per-gb 10 '
+                  f'--assign-public-ip true '
+                  f'--ssh-authorized-keys-file "{key_path}"'
+              )
+              code, stdout, stderr = run(cmd)
+              if code == 0:
+                  print("SUCCESS: Instance created!")
+                  print(stdout)
+                  sys.exit(0)
+              print(f"Failed in {ad}: {stderr.strip()[:200]}")
+              time.sleep(5)
+
+          print("Capacity not available in any AD this run.")
+          EOF
