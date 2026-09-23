@@ -25,7 +25,7 @@ jobs:
           EOF
           chmod 600 ~/.oci/config
 
-      - name: Install OCI CLI & Python dependencies
+      - name: Install OCI CLI
         run: |
           bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
           echo "/home/runner/bin" >> $GITHUB_PATH
@@ -78,30 +78,45 @@ jobs:
           shape_config = json.dumps({"ocpus": 2, "memoryInGBs": 12})
           instance_name = "instance-20260923-0114"
 
-          # Try each AD
-          for ad in ads:
-              print(f"Trying launch in {ad}...")
-              cmd = (
-                  f'oci compute instance launch '
-                  f'--availability-domain "{ad}" '
-                  f'--compartment-id "{tenancy_id}" '
-                  f'--display-name "{instance_name}" '
-                  f'--image-id "{image_id}" '
-                  f'--shape "VM.Standard.A1.Flex" '
-                  f'--shape-config \'{shape_config}\' '
-                  f'--subnet-id "{subnet_id}" '
-                  f'--boot-volume-size-in-gbs 50 '
-                  f'--boot-volume-vpus-per-gb 10 '
-                  f'--assign-public-ip true '
-                  f'--ssh-authorized-keys-file "{key_path}"'
-              )
-              code, stdout, stderr = run(cmd)
-              if code == 0:
-                  print("SUCCESS: Instance created!")
-                  print(stdout)
-                  sys.exit(0)
-              print(f"Failed in {ad}: {stderr.strip()[:200]}")
-              time.sleep(5)
+          # Loop for up to 10 minutes per workflow run (retrying every 25s)
+          start_time = time.time()
+          max_duration_seconds = 600
 
-          print("Capacity not available in any AD this run.")
+          round_num = 1
+          while time.time() - start_time < max_duration_seconds:
+              print(f"=== Round {round_num} ===")
+              for ad in ads:
+                  print(f"Trying launch in {ad}...")
+                  cmd = (
+                      f'oci compute instance launch '
+                      f'--availability-domain "{ad}" '
+                      f'--compartment-id "{tenancy_id}" '
+                      f'--display-name "{instance_name}" '
+                      f'--image-id "{image_id}" '
+                      f'--shape "VM.Standard.A1.Flex" '
+                      f'--shape-config \'{shape_config}\' '
+                      f'--subnet-id "{subnet_id}" '
+                      f'--boot-volume-size-in-gbs 50 '
+                      f'--boot-volume-vpus-per-gb 10 '
+                      f'--assign-public-ip true '
+                      f'--ssh-authorized-keys-file "{key_path}"'
+                  )
+                  code, stdout, stderr = run(cmd)
+                  if code == 0:
+                      print("SUCCESS: Instance created!")
+                      print(stdout)
+                      sys.exit(0)
+                  
+                  err_msg = stderr.strip() if stderr else stdout.strip()
+                  if "Out of host capacity" in err_msg or "TooManyRequests" in err_msg:
+                      print(f"  -> Capacity unavailable in {ad}")
+                  else:
+                      print(f"  -> Response: {err_msg[:120]}")
+                  time.sleep(3)
+
+              round_num += 1
+              print("Waiting 25s before next attempt round...\n")
+              time.sleep(25)
+
+          print("Timeout for this run reached. Next scheduled workflow will continue trying.")
           EOF
