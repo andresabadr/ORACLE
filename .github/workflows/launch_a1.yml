@@ -2,8 +2,12 @@ name: Launch A1 Instance
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '0 */5 * * *'
   workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
 
 jobs:
   launch:
@@ -39,8 +43,15 @@ jobs:
           EXISTING=$(oci compute instance list --compartment-id "$OCI_TENANCY" --lifecycle-state RUNNING --query "data[?contains(\"display-name\", 'instance-20260923-0114')].id" --raw-output)
           if [ -n "$EXISTING" ]; then
             echo "Instance already exists and is running. Exiting."
+            touch /tmp/instance_created.flag
             exit 0
           fi
+
+          # Prepare SSH authorized keys from secret
+          mkdir -p /tmp
+          cat <<'EOF' > /tmp/instance_key.pub
+          ${{ secrets.INSTANCE_SSH_KEY }}
+          EOF
 
           python3 - <<'EOF'
           import json, os, subprocess, sys, time
@@ -50,16 +61,7 @@ jobs:
               return res.returncode, res.stdout, res.stderr
 
           tenancy_id = os.environ.get("OCI_TENANCY")
-          
-          # Injects both the web-generated key and your local machine's id_ed25519 key
-          ssh_keys = (
-              "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDK88GTj+LiuWt1hw9x8mo4qNJ+sCl1w3Aet+DSWABIOK1GFgaC5ahVyWq9pJ6ehv+BufIFkfLoRFhG5Gipp2ZDLjiobfQYH93oiawykuhoVTRDFUOWlgtPwBGNtdoQKN5w0FYjv4V/YWSppt8noLN6+lmumeinrnHZytsbizlWpI6Y9fouFtqKvShMRU/zh+t73C/GrxcmX8xf5s81lUwnubCMyMhFfkKqf8AqroFmo0H8ycoCN0XFxnIB1I2IMO8qZA/mv8rIeYzTCtCJ2yTO61aQrFhvcb2e9KeOlOe5s3fUHBZgH+hEAh+lF5OuOHQmQiHFTh4t+s97JyTu8tKF\n"
-              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILnq6iEl/mbWSO+k+cbNJhXi72vT4BP8ZAovHxN2KqVw oracle-openclaw\n"
-          )
-
-          key_path = os.path.expanduser("/tmp/instance_key.pub")
-          with open(key_path, "w") as f:
-              f.write(ssh_keys)
+          key_path = "/tmp/instance_key.pub"
 
           # Discover Subnet
           _, out, _ = run(f'oci network subnet list --compartment-id {tenancy_id} --display-name "subnet-20260325-2112" --query "data[0].id" --raw-output')
@@ -83,9 +85,9 @@ jobs:
           shape_config = json.dumps({"ocpus": 2, "memoryInGBs": 12})
           instance_name = "instance-20260923-0114"
 
-          # Loop for up to 10 minutes per workflow run (retrying every 25s)
+          # 5.5 hour duration loop per workflow run (retrying every 25s)
           start_time = time.time()
-          max_duration_seconds = 600
+          max_duration_seconds = 19800
 
           round_num = 1
           while time.time() - start_time < max_duration_seconds:
@@ -108,20 +110,34 @@ jobs:
                   )
                   code, stdout, stderr = run(cmd)
                   if code == 0:
-                      print("SUCCESS: Instance created!")
-                      print(stdout)
+                      print("\n SUCCESS: Instance provisioned successfully!")
+                      print("Instance IP and details are available in your Oracle Cloud Console.")
+                      with open("/tmp/instance_created.flag", "w") as f:
+                          f.write("done")
                       sys.exit(0)
                   
                   err_msg = stderr.strip() if stderr else stdout.strip()
                   if "Out of host capacity" in err_msg or "TooManyRequests" in err_msg:
                       print(f"  -> Capacity unavailable in {ad}")
                   else:
-                      print(f"  -> Response: {err_msg[:120]}")
+                      print(f"  -> Response: {err_msg[:100]}")
                   time.sleep(3)
 
               round_num += 1
-              print("Waiting 25s before next attempt round...\n")
+              print("Waiting 25s before next attempt round...\n", flush=True)
               time.sleep(25)
 
-          print("Timeout for this run reached. Next scheduled workflow will continue trying.")
+          print("Workflow run duration limit reached. Triggering next cycle.")
           EOF
+
+      - name: Self-trigger next run if not yet created
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f /tmp/instance_created.flag ]; then
+            echo "Instance was created. Terminating automated chain."
+          else
+            echo "Instance not created yet. Triggering next workflow run..."
+            gh workflow run launch_a1.yml -R ${{ github.repository }}
+          fi
