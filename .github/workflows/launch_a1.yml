@@ -9,9 +9,20 @@ permissions:
   actions: write
   contents: read
 
+# Evita que múltiples workflows se ejecuten al mismo tiempo consumiendo minutos de GitHub Actions
+concurrency:
+  group: oracle-a1-launcher
+  cancel-in-progress: false
+
 jobs:
   launch:
     runs-on: ubuntu-latest
+    env:
+      # Variables externalizadas para no ensuciar el script de Python
+      TARGET_SUBNET_NAME: "subnet-20260325-2112"
+      TARGET_INSTANCE_NAME: "instance-20260923-0114"
+      MAX_DURATION_SECONDS: 16200 # Reducido a 4.5 horas para evitar solapamiento con el cron
+
     steps:
       - name: Configure OCI CLI
         run: |
@@ -39,15 +50,15 @@ jobs:
           export PATH="/home/runner/bin:$PATH"
           export OCI_TENANCY="${{ secrets.OCI_TENANCY_OCID }}"
           
-          # Check if instance already exists
-          EXISTING=$(oci compute instance list --compartment-id "$OCI_TENANCY" --lifecycle-state RUNNING --query "data[?contains(\"display-name\", 'instance-20260923-0114')].id" --raw-output)
+          # Verificar si la instancia ya existe (usando la variable de entorno)
+          EXISTING=$(oci compute instance list --compartment-id "$OCI_TENANCY" --lifecycle-state RUNNING --query "data[?contains(\"display-name\", '$TARGET_INSTANCE_NAME')].id" --raw-output)
           if [ -n "$EXISTING" ]; then
             echo "Instance already exists and is running. Exiting."
             touch /tmp/instance_created.flag
             exit 0
           fi
 
-          # Prepare SSH authorized keys from secret
+          # Preparar la clave SSH
           mkdir -p /tmp
           cat <<'EOF' > /tmp/instance_key.pub
           ${{ secrets.INSTANCE_SSH_KEY }}
@@ -62,15 +73,18 @@ jobs:
 
           tenancy_id = os.environ.get("OCI_TENANCY")
           key_path = "/tmp/instance_key.pub"
+          subnet_name = os.environ.get("TARGET_SUBNET_NAME")
+          instance_name = os.environ.get("TARGET_INSTANCE_NAME")
+          max_duration_seconds = int(os.environ.get("MAX_DURATION_SECONDS", 16200))
 
-          # Discover Subnet
-          _, out, _ = run(f'oci network subnet list --compartment-id {tenancy_id} --display-name "subnet-20260325-2112" --query "data[0].id" --raw-output')
+          # Descubrir la Subred
+          _, out, _ = run(f'oci network subnet list --compartment-id {tenancy_id} --display-name "{subnet_name}" --query "data[0].id" --raw-output')
           subnet_id = out.strip()
           if not subnet_id or subnet_id == "None":
               _, out, _ = run(f'oci network subnet list --compartment-id {tenancy_id} --query "data[0].id" --raw-output')
               subnet_id = out.strip()
 
-          # Discover Image
+          # Descubrir la Imagen (Oracle Linux 9)
           _, out, _ = run(
               f'oci compute image list --compartment-id {tenancy_id} --shape VM.Standard.A1.Flex '
               f'--operating-system "Oracle Linux" --operating-system-version "9" '
@@ -78,18 +92,15 @@ jobs:
           )
           image_id = out.strip()
 
-          # Discover ADs
+          # Descubrir Zonas de Disponibilidad (ADs)
           _, out, _ = run(f'oci iam availability-domain list --compartment-id {tenancy_id} --query "data[].name" --output json')
           ads = json.loads(out)
 
           shape_config = json.dumps({"ocpus": 2, "memoryInGBs": 12})
-          instance_name = "instance-20260923-0114"
 
-          # 5.5 hour duration loop per workflow run (retrying every 25s)
           start_time = time.time()
-          max_duration_seconds = 19800
-
           round_num = 1
+          
           while time.time() - start_time < max_duration_seconds:
               print(f"=== Round {round_num} ===")
               for ad in ads:
@@ -133,7 +144,8 @@ jobs:
       - name: Self-trigger next run if not yet created
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # AHORA USA EL PAT (Personal Access Token) EN LUGAR DEL GITHUB_TOKEN POR DEFECTO
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           if [ -f /tmp/instance_created.flag ]; then
             echo "Instance was created. Terminating automated chain."
