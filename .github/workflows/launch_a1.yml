@@ -115,7 +115,6 @@ jobs:
                       f'--shape-config \'{shape_config}\' '
                       f'--subnet-id "{subnet_id}" '
                       f'--boot-volume-size-in-gbs 50 '
-                      f'--boot-volume-vpus-per-gb 10 '
                       f'--assign-public-ip true '
                       f'--ssh-authorized-keys-file "{key_path}"'
                   )
